@@ -41,7 +41,7 @@ chmod 600 ~/.hacker-news-env
 ```
 
 **Get API Keys:**
-- **Gemini API:** https://aistudio.google.com/app/apikeys
+- **Gemini API:** https://aistudio.google.com/app/api-keys
 - **Discord Webhook:** Discord Server > Settings > Integrations > Webhooks
 
 ### 3. Quick Validation
