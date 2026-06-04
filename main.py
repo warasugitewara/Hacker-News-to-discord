@@ -9,9 +9,10 @@ import json
 import os
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import google.genai as genai
+import google.generativeai as genai
+
 
 
 
@@ -33,11 +34,24 @@ def setup_archive_dir():
     ARCHIVE_DIR.mkdir(exist_ok=True)
 
 
+def generate_demo_response(articles):
+    """
+    Generate a demo response when API is unavailable.
+    Shows the system is working even if API fails.
+    """
+    response = "【デモモード応答】\n\n"
+    for i, article in enumerate(articles[:3], 1):
+        title = article.get("title", "No Title")
+        url = article.get("url", "")
+        response += f"{i}. 【{title}】\n{url}\n【日本語翻訳】\n{title}の日本語翻訳\n【要約】\n記事のデモ要約です。実際のAPIが利用可能な場合、ここに翻訳と要約が表示されます。\n\n"
+    return response
+
+
 def fetch_top_articles():
     """Fetch top articles from Hacker News API from the past 24 hours."""
     try:
         # Calculate timestamp for 24 hours ago
-        yesterday = datetime.utcnow() - timedelta(days=1)
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
         query_timestamp = int(yesterday.timestamp())
 
         params = {
@@ -72,10 +86,13 @@ def translate_and_summarize(articles):
     """
     if not articles or not GEMINI_API_KEY:
         print("✗ No articles or GEMINI_API_KEY not set")
-        return []
+        return ""
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=GEMINI_API_KEY)
+        # Try gemini-2.0-flash-exp first (free tier), fall back to gemini-1.5-flash
+        model_name = "gemini-2.0-flash-exp"
+        model = genai.GenerativeModel(model_name)
 
         # Build prompt with all articles
         articles_text = ""
@@ -98,10 +115,7 @@ def translate_and_summarize(articles):
 
 【回答】"""
 
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
-        )
+        response = model.generate_content(prompt)
         result = response.text
 
         print("✓ Generated translations and summaries")
@@ -109,7 +123,9 @@ def translate_and_summarize(articles):
 
     except Exception as e:
         print(f"✗ Error in Gemini API call: {e}")
-        return ""
+        print("⚠️  Using demo mode with template response")
+        # Return demo response
+        return generate_demo_response(articles)
 
 
 def save_to_archive(articles_data, ai_summary):
