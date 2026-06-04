@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Hacker News to Discord at 07:00 JST
+Requires=hacker-news.service
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
