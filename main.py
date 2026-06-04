@@ -183,26 +183,28 @@ def save_to_archive(articles_data, ai_summary):
 
 
 def send_to_discord(ai_summary):
-    """Send AI summary to Discord via webhook, splitting if necessary."""
+    """Send AI summary to Discord via webhook with simplified format."""
     if not DISCORD_WEBHOOK_URL:
         print("! Discord webhook URL not set, skipping Discord notification")
         return True
 
     try:
-        # Split content if it exceeds Discord's character limit
-        chunks = []
-        current_chunk = ""
-
-        for line in ai_summary.split('\n'):
-            if len(current_chunk) + len(line) + 1 > DISCORD_MAX_CHARS:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = line
-            else:
-                current_chunk += line + '\n'
-
-        if current_chunk:
-            chunks.append(current_chunk)
+        # Parse the AI summary and extract key information
+        articles = parse_summary(ai_summary)
+        
+        if not articles:
+            # Fallback: send raw summary
+            chunks = split_into_chunks(ai_summary, DISCORD_MAX_CHARS)
+        else:
+            # Create simplified messages for each article
+            chunks = []
+            for article in articles:
+                msg = format_article_message(article)
+                if msg:
+                    chunks.append(msg)
+            
+            if not chunks:
+                chunks = split_into_chunks(ai_summary, DISCORD_MAX_CHARS)
 
         # Send each chunk as a separate message
         for i, chunk in enumerate(chunks, 1):
@@ -210,7 +212,7 @@ def send_to_discord(ai_summary):
                 continue
 
             payload = {
-                "content": f"```\n{chunk}\n```" if len(chunks) > 1 else chunk,
+                "content": chunk,
                 "username": DISCORD_BOT_NAME,
                 "avatar_url": DISCORD_WEBHOOK_ICON
             }
@@ -228,6 +230,62 @@ def send_to_discord(ai_summary):
     except requests.RequestException as e:
         print(f"✗ Error sending to Discord: {e}")
         return False
+
+
+def parse_summary(ai_summary):
+    """Parse AI summary to extract individual articles."""
+    articles = []
+    lines = ai_summary.split('\n')
+    current_article = {}
+    
+    for line in lines:
+        # Look for numbered articles like "1. 【Title】"
+        if line.strip() and line[0].isdigit() and '【' in line and '】' in line:
+            if current_article:
+                articles.append(current_article)
+            # Extract title
+            start = line.find('【') + 1
+            end = line.find('】')
+            current_article = {
+                'title': line[start:end] if start > 0 and end > start else line,
+                'number': line.split('.')[0] if '.' in line else ''
+            }
+        elif '【日本語翻訳】' in line:
+            current_article['has_translation'] = True
+        elif '【簡潔な要約' in line or '【要約】' in line:
+            current_article['has_summary'] = True
+    
+    if current_article:
+        articles.append(current_article)
+    
+    return articles
+
+
+def format_article_message(article):
+    """Format a single article into a readable Discord message."""
+    msg = f"**{article.get('number', '')}. {article.get('title', 'No Title')}**\n"
+    msg += "✅ 翻訳と要約が準備できました\n"
+    msg += "> 詳細は Archive を確認してください\n"
+    return msg
+
+
+def split_into_chunks(text, max_size):
+    """Split text into chunks respecting character limit."""
+    chunks = []
+    current_chunk = ""
+    
+    for line in text.split('\n'):
+        if len(current_chunk) + len(line) + 1 > max_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = line
+        else:
+            current_chunk += line + '\n'
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks
 
 
 def main():
