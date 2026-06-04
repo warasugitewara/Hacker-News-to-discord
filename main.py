@@ -27,6 +27,8 @@ ARCHIVE_DIR = SCRIPT_DIR / "Archive"
 MAX_ARTICLES = 15
 DISCORD_MAX_CHARS = 2000
 SLEEP_BETWEEN_REQUESTS = 1  # seconds
+DISCORD_WEBHOOK_ICON = "https://cdn.discordapp.com/attachments/1498538598360678552/1512024949911715950/yingtu-1780565173913.jpg?ex=6a229678&is=6a2144f8&hm=bccc412c7b9d0adcfe10ec5643bf49d2717f96344a86892d2fe65c0bcfb16b36"
+DISCORD_BOT_NAME = "🔗 Hacker News"
 
 
 def setup_archive_dir():
@@ -39,11 +41,20 @@ def generate_demo_response(articles):
     Generate a demo response when API is unavailable.
     Shows the system is working even if API fails.
     """
-    response = "【デモモード応答】\n\n"
+    response = "⚠️ **【デモモード】** API が利用できません\n"
+    response += "実際の翻訳と要約は以下の通りです（テンプレート）:\n\n"
     for i, article in enumerate(articles[:3], 1):
         title = article.get("title", "No Title")
         url = article.get("url", "")
-        response += f"{i}. 【{title}】\n{url}\n【日本語翻訳】\n{title}の日本語翻訳\n【要約】\n記事のデモ要約です。実際のAPIが利用可能な場合、ここに翻訳と要約が表示されます。\n\n"
+        response += f"**{i}. {title}**\n"
+        response += f"URL: {url}\n"
+        response += f"> 日本語翻訳: {title}の日本語翻訳\n"
+        response += f"> 要約: 記事の内容を要約します。実際のAPIが利用可能な場合、ここに翻訳と要約が表示されます。\n\n"
+    response += "---\n"
+    response += "💡 **API を有効にする:**\n"
+    response += "1. https://aistudio.google.com/app/apikeys から API キーを取得\n"
+    response += "2. `~/.hacker-news-env` に設定\n"
+    response += "3. スクリプトを再実行\n"
     return response
 
 
@@ -200,7 +211,8 @@ def send_to_discord(ai_summary):
 
             payload = {
                 "content": f"```\n{chunk}\n```" if len(chunks) > 1 else chunk,
-                "username": "Hacker News Bot"
+                "username": DISCORD_BOT_NAME,
+                "avatar_url": DISCORD_WEBHOOK_ICON
             }
 
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
