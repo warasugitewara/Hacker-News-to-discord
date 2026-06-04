@@ -101,8 +101,8 @@ def translate_and_summarize(articles):
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        # Try gemini-2.0-flash-exp first (free tier), fall back to gemini-1.5-flash
-        model_name = "gemini-2.0-flash-exp"
+        # Use gemini-3.5-flash (latest available model)
+        model_name = "gemini-3.5-flash"
         model = genai.GenerativeModel(model_name)
 
         # Build prompt with all articles
