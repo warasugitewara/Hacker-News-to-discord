@@ -1,17 +1,21 @@
 # Hacker News to Discord
 
-Fetches top articles from Hacker News, translates and summarizes them using Gemini API, saves to local Archive, and notifies via Discord webhook.
+Fetches top articles from Hacker News, translates and summarizes them using Gemini API, sends formatted digests to Discord, saves to local Archive, and automatically commits to GitHub.
 
 ## Features
 
-- ✓ Fetches top Hacker News articles from the past 24 hours
-- ✓ Translates and summarizes using Gemini 2.0 Flash (latest model)
+- ✓ Fetches top 5 Hacker News articles from the past 24 hours
+- ✓ Translates and summarizes using Gemini 3.5 Flash
+- ✓ Formatted Discord messages with:
+  - Clickable markdown links for article titles
+  - Quote-formatted Japanese translations and summaries
+  - No URL embeds (clean, readable formatting)
+  - Proper article separation
 - ✓ Respects API rate limits
 - ✓ Graceful fallback to demo mode if API unavailable
-- ✓ Saves digests to local Archive directory
-- ✓ Sends translations to Discord via webhook
+- ✓ Saves daily digests to Archive directory
 - ✓ Automatically commits and pushes to GitHub
-- ✓ Scheduled daily execution at 07:00 JST via systemd
+- ✓ **Scheduled daily execution at 07:00 JST via systemd timer**
 
 ## Quick Start
 
