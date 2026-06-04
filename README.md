@@ -4,9 +4,17 @@ Fetches top articles from Hacker News, translates and summarizes them using Gemi
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Create Virtual Environment and Install Dependencies
 
 ```bash
+python3 -m venv venv
+venv/bin/pip install --no-user -r requirements.txt
+```
+
+Or for Bash users:
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 

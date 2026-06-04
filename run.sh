@@ -5,6 +5,7 @@ set -e  # Exit on any error
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/main.py"
+VENV_PYTHON="$SCRIPT_DIR/venv/bin/python3"
 ARCHIVE_DIR="$SCRIPT_DIR/Archive"
 
 echo "========================================="
@@ -15,6 +16,12 @@ echo "========================================="
 # Check if Python script exists
 if [ ! -f "$PYTHON_SCRIPT" ]; then
     echo "✗ Python script not found: $PYTHON_SCRIPT"
+    exit 1
+fi
+
+# Check if venv exists
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "✗ Virtual environment not found. Please run: python3 -m venv venv && venv/bin/pip install -r requirements.txt"
     exit 1
 fi
 
@@ -29,8 +36,8 @@ if [ -z "$DISCORD_WEBHOOK_URL" ]; then
     echo "! Warning: DISCORD_WEBHOOK_URL environment variable is not set"
 fi
 
-# Run the main Python script
-if python3 "$PYTHON_SCRIPT"; then
+# Run the main Python script using venv
+if "$VENV_PYTHON" "$PYTHON_SCRIPT"; then
     echo "✓ Python script executed successfully"
     
     # Check if Archive directory has changes

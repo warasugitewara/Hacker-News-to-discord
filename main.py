@@ -11,7 +11,8 @@ import requests
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-import google.generativeai as genai
+import google.genai as genai
+
 
 
 # Configuration from environment variables
@@ -74,8 +75,7 @@ def translate_and_summarize(articles):
         return []
 
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
         # Build prompt with all articles
         articles_text = ""
@@ -98,7 +98,10 @@ def translate_and_summarize(articles):
 
 【回答】"""
 
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
         result = response.text
 
         print("✓ Generated translations and summaries")
