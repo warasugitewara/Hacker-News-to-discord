@@ -6,7 +6,7 @@ After=network.target
 Type=oneshot
 User=waras
 WorkingDirectory=/home/waras/Hacker-news-to-Discord
-EnvironmentFile=%h/.hacker-news-env
+EnvironmentFile=/home/waras/.hacker-news-env
 ExecStart=/home/waras/Hacker-news-to-Discord/run.sh
 StandardOutput=journal
 StandardError=journal
@@ -14,4 +14,3 @@ SyslogIdentifier=hacker-news
 
 [Install]
 WantedBy=multi-user.target
-
