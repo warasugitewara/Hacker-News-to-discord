@@ -24,7 +24,7 @@ SCRIPT_DIR = Path(__file__).parent
 ARCHIVE_DIR = SCRIPT_DIR / "Archive"
 
 # Constants
-MAX_ARTICLES = 15
+MAX_ARTICLES = 5  # Reduced to top 5 for morning digest
 DISCORD_MAX_CHARS = 2000
 SLEEP_BETWEEN_REQUESTS = 1  # seconds
 DISCORD_WEBHOOK_ICON = "https://cdn.discordapp.com/attachments/1498538598360678552/1512024949911715950/yingtu-1780565173913.jpg?ex=6a229678&is=6a2144f8&hm=bccc412c7b9d0adcfe10ec5643bf49d2717f96344a86892d2fe65c0bcfb16b36"
@@ -41,20 +41,15 @@ def generate_demo_response(articles):
     Generate a demo response when API is unavailable.
     Shows the system is working even if API fails.
     """
-    response = "⚠️ **【デモモード】** API が利用できません\n"
-    response += "実際の翻訳と要約は以下の通りです（テンプレート）:\n\n"
-    for i, article in enumerate(articles[:3], 1):
+    response = ""
+    for i, article in enumerate(articles[:5], 1):
         title = article.get("title", "No Title")
         url = article.get("url", "")
-        response += f"**{i}. {title}**\n"
-        response += f"URL: {url}\n"
-        response += f"> 日本語翻訳: {title}の日本語翻訳\n"
-        response += f"> 要約: 記事の内容を要約します。実際のAPIが利用可能な場合、ここに翻訳と要約が表示されます。\n\n"
-    response += "---\n"
-    response += "💡 **API を有効にする:**\n"
-    response += "1. https://aistudio.google.com/app/apikeys から API キーを取得\n"
-    response += "2. `~/.hacker-news-env` に設定\n"
-    response += "3. スクリプトを再実行\n"
+        response += f"**{i}. [{title}](<{url}>)**\n"
+        response += f"> 日本語翻訳: {title}の日本語翻訳です。\n"
+        response += f"> 要約: 記事の内容を簡潔に要約しました。\n"
+        if i < 5:
+            response += "\n"
     return response
 
 
@@ -93,11 +88,11 @@ def fetch_top_articles():
 def translate_and_summarize(articles):
     """
     Translate and summarize articles using Gemini API.
-    Groups articles in a single prompt to avoid rate limiting.
+    Returns tuple: (ai_summary, articles) to preserve URL mapping
     """
     if not articles or not GEMINI_API_KEY:
         print("✗ No articles or GEMINI_API_KEY not set")
-        return ""
+        return "", articles
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -128,15 +123,33 @@ def translate_and_summarize(articles):
 
         response = model.generate_content(prompt)
         result = response.text
+        
+        # Clean up the response: remove unnecessary template text
+        lines = result.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            # Skip template/metadata lines
+            if any(skip in line for skip in [
+                'ご提示いただいた',
+                '指定の形式で',
+                '回答',
+                '---',
+                'ご指定のフォーマットに沿って',
+                '各記事の日本語翻訳と簡潔な要約をお届けします'
+            ]):
+                continue
+            cleaned_lines.append(line)
+        
+        result = '\n'.join(cleaned_lines).strip()
 
         print("✓ Generated translations and summaries")
-        return result
+        return result, articles
 
     except Exception as e:
         print(f"✗ Error in Gemini API call: {e}")
         print("⚠️  Using demo mode with template response")
         # Return demo response
-        return generate_demo_response(articles)
+        return generate_demo_response(articles), articles
 
 
 def save_to_archive(articles_data, ai_summary):
@@ -182,31 +195,132 @@ def save_to_archive(articles_data, ai_summary):
         return None
 
 
-def send_to_discord(ai_summary):
-    """Send AI summary to Discord via webhook with simplified format."""
+def format_for_discord(ai_summary, articles=None):
+    """Format AI summary for better Discord readability.
+    - Removes duplicate URL lines
+    - Formats article titles as markdown links [title](<url>)
+    - Adds proper spacing between articles
+    - Uses > quotes for translations/summaries
+    """
+    import re
+    lines = ai_summary.split('\n')
+    formatted_lines = []
+    skip_next_url = False
+    in_article = False
+    
+    for i, line in enumerate(lines):
+        # Detect article title lines (e.g., "1. 【Title】")
+        title_match = re.match(r'^(\d+)\.\s+【(.+?)】$', line)
+        if title_match:
+            article_num = int(title_match.group(1))
+            title = title_match.group(2)
+            
+            # Add blank lines before new article (except first one)
+            if formatted_lines:
+                # Ensure we have at least one blank line before this article
+                if formatted_lines[-1].strip() != "":
+                    formatted_lines.append("")
+                    formatted_lines.append("")  # Double blank line for article separation
+            
+            # Get URL from articles data
+            if articles and article_num <= len(articles):
+                url = articles[article_num - 1].get("url", "")
+                if url:
+                    # Format as markdown link: **[【Title】](<url>)**
+                    line = f"**{article_num}. [【{title}】](<{url}>)**"
+                    skip_next_url = True  # Skip the next URL line
+                else:
+                    line = f"**{article_num}. 【{title}】**"
+            else:
+                line = f"**{line}**"
+            
+            formatted_lines.append(line)
+            in_article = True
+        # Skip "URL: https://..." lines (already in title link)
+        elif skip_next_url and line.strip().startswith('URL:'):
+            skip_next_url = False
+            continue
+        # Skip bare URLs that come after title
+        elif skip_next_url and re.match(r'^https?://', line.strip()):
+            skip_next_url = False
+            continue
+        # Quote content lines (translations and summaries)
+        elif line.strip().startswith(('【日本語翻訳】', '【簡潔な要約')):
+            formatted_lines.append(f"> {line}")
+            skip_next_url = False
+        elif line.strip() and any(line.strip().startswith(marker) for marker in ['・', '-', '・・']):
+            formatted_lines.append(f"> {line}")
+        # Quote any non-empty line that's part of an article content (after title, before next article)
+        elif in_article and line.strip() and not re.match(r'^(\d+)\.\s+【', line):
+            # Check if this looks like article metadata (URL line) or actual content
+            if not line.strip().startswith('URL:') and not re.match(r'^https?://', line.strip()):
+                formatted_lines.append(f"> {line}")
+            else:
+                formatted_lines.append(line)
+        else:
+            # Empty lines - preserve only between content sections
+            if not line.strip():
+                if formatted_lines and formatted_lines[-1].strip():
+                    formatted_lines.append("")
+            else:
+                formatted_lines.append(line)
+    
+    return '\n'.join(formatted_lines)
+
+
+def send_to_discord(ai_summary, articles=None):
+    """Send complete AI summary to Discord via webhook with optimized formatting."""
     if not DISCORD_WEBHOOK_URL:
         print("! Discord webhook URL not set, skipping Discord notification")
         return True
 
     try:
-        # Parse the AI summary and extract key information
-        articles = parse_summary(ai_summary)
+        # Format for Discord (prevent URL embeds, improve readability, add markdown links)
+        formatted_summary = format_for_discord(ai_summary, articles)
         
-        if not articles:
-            # Fallback: send raw summary
-            chunks = split_into_chunks(ai_summary, DISCORD_MAX_CHARS)
-        else:
-            # Create simplified messages for each article
-            chunks = []
-            for article in articles:
-                msg = format_article_message(article)
-                if msg:
-                    chunks.append(msg)
+        # Split content into chunks by article boundary (\n\n marks article separation)
+        chunks = []
+        current_chunk = ""
+        lines = formatted_summary.split('\n')
+        
+        for i, line in enumerate(lines):
+            # Check if this is a new article title (starts with **)
+            is_article_title = line.strip().startswith('**') and '【' in line
             
-            if not chunks:
-                chunks = split_into_chunks(ai_summary, DISCORD_MAX_CHARS)
+            # If we're starting a new article and current chunk is getting large
+            if is_article_title and current_chunk and len(current_chunk) > DISCORD_MAX_CHARS * 0.6:
+                # Save current chunk
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = line + '\n'
+            else:
+                # Add line to current chunk
+                if current_chunk and not current_chunk.endswith('\n'):
+                    current_chunk += '\n'
+                current_chunk += line + '\n'
+                
+                # If chunk exceeds limit, save it
+                if len(current_chunk) > DISCORD_MAX_CHARS:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+        
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
 
-        # Send each chunk as a separate message
+        # Add header message with timestamp
+        header = f"📰 **Hacker News Digest** - {datetime.now().strftime('%Y-%m-%d')}"
+        
+        # Send header first
+        header_payload = {
+            "content": header,
+            "username": DISCORD_BOT_NAME,
+            "avatar_url": DISCORD_WEBHOOK_ICON
+        }
+        response = requests.post(DISCORD_WEBHOOK_URL, json=header_payload, timeout=10)
+        response.raise_for_status()
+        time.sleep(SLEEP_BETWEEN_REQUESTS)
+
+        # Send each chunk as a separate message with full content
         for i, chunk in enumerate(chunks, 1):
             if not chunk.strip():
                 continue
@@ -224,7 +338,7 @@ def send_to_discord(ai_summary):
             if i < len(chunks):
                 time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-        print(f"✓ Sent {len(chunks)} message(s) to Discord")
+        print(f"✓ Sent {len(chunks) + 1} message(s) to Discord")
         return True
 
     except requests.RequestException as e:
@@ -305,8 +419,8 @@ def main():
             print("✗ No articles fetched, exiting")
             return False
 
-        # Translate and summarize
-        ai_summary = translate_and_summarize(articles)
+        # Translate and summarize (returns tuple: (summary, articles))
+        ai_summary, articles_with_data = translate_and_summarize(articles)
         if not ai_summary:
             print("✗ Failed to generate summaries, exiting")
             return False
@@ -317,8 +431,8 @@ def main():
             print("✗ Failed to save to archive, exiting")
             return False
 
-        # Send to Discord
-        send_to_discord(ai_summary)
+        # Send to Discord with articles data for markdown links
+        send_to_discord(ai_summary, articles_with_data)
 
         print("=" * 60)
         print("✓ All tasks completed successfully")
