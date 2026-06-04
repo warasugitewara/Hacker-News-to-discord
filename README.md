@@ -1,7 +1,8 @@
 # Hacker News to Discord
 
 Hacker News の最新記事を毎日自動取得し、Gemini API で日本語翻訳・要約して Discord に送信。ローカルに保存し、GitHub に自動コミットします。
-##制作理由
+## 制作理由
+
 Hacker Newsへの関心はあってもURLにいちいち入るのも大変だし、翻訳する手間もかかるため、作成しました。
 ## 機能
 
