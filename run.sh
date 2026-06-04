@@ -66,8 +66,8 @@ if "$VENV_PYTHON" "$PYTHON_SCRIPT"; then
     if git status --porcelain | grep -q "Archive/"; then
         echo "✓ Changes detected in Archive directory"
         
-        # Add, commit, and push changes
-        git add Archive/
+        # Add, commit, and push changes (use -f to bypass .gitignore)
+        git add -f Archive/
         echo "✓ Added Archive/ changes to git"
         
         COMMIT_DATE=$(date +"%Y-%m-%d")
