@@ -79,10 +79,12 @@ echo "Testing Python Dependencies"
 echo "========================================="
 echo ""
 
-if "$SCRIPT_DIR/venv/bin/python3" -c "import requests, google.genai; print('✓ All imports successful')" 2>/dev/null; then
+if "$SCRIPT_DIR/venv/bin/python3" -c "import requests, google.generativeai; print('✓ All imports successful')" 2>&1 | grep -q "All imports successful"; then
     echo "✓ Python dependencies are working"
 else
     echo "❌ Python dependency import failed"
+    echo "Running detailed diagnostics..."
+    "$SCRIPT_DIR/venv/bin/python3" -c "import requests, google.generativeai" 2>&1 | head -20
     exit 1
 fi
 
