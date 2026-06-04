@@ -1,7 +1,8 @@
 # Hacker News to Discord
 
 Hacker News の最新記事を毎日自動取得し、Gemini API で日本語翻訳・要約して Discord に送信。ローカルに保存し、GitHub に自動コミットします。
-
+##制作理由
+Hacker Newsへの関心はあってもURLにいちいち入るのも大変だし、翻訳する手間もかかるため、作成しました。
 ## 機能
 
 - ✓ 過去 24 時間の Hacker News トップ 5 記事を自動取得
@@ -16,6 +17,10 @@ Hacker News の最新記事を毎日自動取得し、Gemini API で日本語翻
 - ✓ 毎日のダイジェストを Archive ディレクトリに保存
 - ✓ 自動的に GitHub にコミット＆プッシュ
 - ✓ **毎日 07:00 JST に systemd タイマーで自動実行**
+
+## 画像
+<img width="1097" height="731" alt="Screenshot 2026-06-04 23 33 52" src="https://github.com/user-attachments/assets/4140fd77-3d9f-4161-a52c-24d82687e12d" />
+
 
 ## クイックスタート
 
@@ -143,7 +148,8 @@ systemctl list-timers hacker-news.timer
 # 実行ログを確認
 sudo journalctl -u hacker-news.service -xe
 ```
-
+##Todo(やらない可能性高)
+- Docker 対応
 ## ライセンス
 
 MIT License
