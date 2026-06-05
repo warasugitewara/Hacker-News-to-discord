@@ -60,20 +60,19 @@ fi
 if "$VENV_PYTHON" "$PYTHON_SCRIPT"; then
     echo "✓ Python script executed successfully"
     
-    # Check if Archive directory has changes
+    # Commit and push Archive changes
+    # NOTE: git status won't show ignored files, so we add -f first, then check staged diff
     cd "$SCRIPT_DIR"
-    
-    if git status --porcelain | grep -q "Archive/"; then
+
+    git add -f Archive/
+
+    if ! git diff --cached --quiet; then
         echo "✓ Changes detected in Archive directory"
-        
-        # Add, commit, and push changes (use -f to bypass .gitignore)
-        git add -f Archive/
-        echo "✓ Added Archive/ changes to git"
-        
+
         COMMIT_DATE=$(date +"%Y-%m-%d")
         git commit -m "docs: archive Hacker News digest [$COMMIT_DATE]"
         echo "✓ Committed changes"
-        
+
         git push origin main
         echo "✓ Pushed to GitHub"
     else
