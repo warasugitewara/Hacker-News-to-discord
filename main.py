@@ -1,449 +1,411 @@
 #!/usr/bin/env python3
 """
 Hacker News to Discord Integration
-Fetches top articles from Hacker News, translates/summarizes them with Gemini API,
-saves to local Archive, and notifies via Discord webhook.
+=================================
+
+Fetches the top Hacker News stories from the past 24 hours, asks Gemini for a
+Japanese translation + short summary of each, and posts a formatted message to
+a Discord webhook.
+
+Design note
+-----------
+The AI model is **only** trusted to return translation/summary text as
+structured JSON. Everything that must be correct -- article titles, URLs,
+points, message layout -- is built deterministically in Python from the Hacker
+News API data. This avoids the whole class of "AI didn't follow the format"
+bugs (missing titles, dropped URLs, broken formatting) that come from parsing
+free-form model output with regexes.
 """
 
 import json
 import os
-import requests
+import re
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+
+import requests
 import google.generativeai as genai
 
 
-
-
-# Configuration from environment variables
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
 HN_API_URL = "https://hn.algolia.com/api/v1/search_by_date"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-SCRIPT_DIR = Path(__file__).parent
-ARCHIVE_DIR = SCRIPT_DIR / "Archive"
+HN_ITEM_URL = "https://news.ycombinator.com/item?id={id}"
 
-# Constants
-MAX_ARTICLES = 5  # Reduced to top 5 for morning digest
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
+# How many stories end up in the digest.
+MAX_ARTICLES = int(os.getenv("HN_MAX_ARTICLES", "5"))
+# How many recent stories to rank before picking the top `MAX_ARTICLES`.
+# `search_by_date` returns newest-first, so we need a wide pool to find the
+# genuinely popular stories instead of merely the most recent ones.
+CANDIDATE_POOL = int(os.getenv("HN_CANDIDATE_POOL", "100"))
+LOOKBACK_HOURS = int(os.getenv("HN_LOOKBACK_HOURS", "24"))
+
 DISCORD_MAX_CHARS = 2000
-SLEEP_BETWEEN_REQUESTS = 1  # seconds
-DISCORD_WEBHOOK_ICON = "https://cdn.discordapp.com/attachments/1498538598360678552/1512024949911715950/yingtu-1780565173913.jpg?ex=6a229678&is=6a2144f8&hm=bccc412c7b9d0adcfe10ec5643bf49d2717f96344a86892d2fe65c0bcfb16b36"
+SLEEP_BETWEEN_REQUESTS = 1  # seconds, to stay under Discord's webhook rate limit
+HTTP_TIMEOUT = 15
+MAX_RETRIES = 3
+
+DISCORD_WEBHOOK_ICON = (
+    "https://cdn.discordapp.com/attachments/1498538598360678552/1512024949911715950/"
+    "yingtu-1780565173913.jpg?ex=6a229678&is=6a2144f8&hm="
+    "bccc412c7b9d0adcfe10ec5643bf49d2717f96344a86892d2fe65c0bcfb16b36"
+)
 DISCORD_BOT_NAME = "🔗 Hacker News"
 
+# A single connection-pooled session for all outbound HTTP.
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "hacker-news-to-discord/2.0"})
 
-def setup_archive_dir():
-    """Create Archive directory if it doesn't exist."""
-    ARCHIVE_DIR.mkdir(exist_ok=True)
 
+# --------------------------------------------------------------------------- #
+# Hacker News
+# --------------------------------------------------------------------------- #
+def _normalize_article(hit):
+    """Turn a raw Algolia hit into the flat dict the rest of the code uses.
 
-def generate_demo_response(articles):
+    Crucially, `url` falls back to the Hacker News discussion permalink so that
+    text posts (Show HN / Ask HN, which have no external URL) never end up with
+    a missing link.
     """
-    Generate a demo response when API is unavailable.
-    Shows the system is working even if API fails.
-    """
-    response = ""
-    for i, article in enumerate(articles[:5], 1):
-        title = article.get("title", "No Title")
-        url = article.get("url", "")
-        response += f"**{i}. [{title}](<{url}>)**\n"
-        response += f"> 日本語翻訳: {title}の日本語翻訳です。\n"
-        response += f"> 要約: 記事の内容を簡潔に要約しました。\n"
-        if i < 5:
-            response += "\n"
-    return response
+    object_id = str(hit.get("objectID", ""))
+    hn_url = HN_ITEM_URL.format(id=object_id) if object_id else ""
+    external_url = (hit.get("url") or "").strip()
+
+    return {
+        "title": (hit.get("title") or "").strip(),
+        "url": external_url or hn_url,          # never empty
+        "external_url": external_url,           # may be empty for text posts
+        "hn_url": hn_url,
+        "points": hit.get("points") or 0,
+        "author": hit.get("author") or "N/A",
+        "num_comments": hit.get("num_comments") or 0,
+        "object_id": object_id,
+    }
 
 
 def fetch_top_articles():
-    """Fetch top articles from Hacker News API from the past 24 hours."""
+    """Fetch the top stories from the past `LOOKBACK_HOURS` hours.
+
+    We pull a wide pool of recent stories and rank them by points locally, so
+    the digest reflects the *most upvoted* stories rather than merely the newest
+    ones.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    params = {
+        # Empty query + tags=story means "all stories" (a non-empty query would
+        # incorrectly restrict results to stories mentioning that word).
+        "query": "",
+        "tags": "story",
+        "numericFilters": f"created_at_i>{int(cutoff.timestamp())}",
+        "hitsPerPage": CANDIDATE_POOL,
+    }
+
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = SESSION.get(HN_API_URL, params=params, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+            hits = response.json().get("hits", [])
+
+            # Keep only real stories that have a title, rank by points.
+            articles = [_normalize_article(h) for h in hits if (h.get("title") or "").strip()]
+            articles.sort(key=lambda a: a["points"], reverse=True)
+            articles = articles[:MAX_ARTICLES]
+
+            print(f"✓ Fetched {len(hits)} candidates, selected top {len(articles)} by points")
+            return articles
+
+        except requests.RequestException as e:
+            last_error = e
+            print(f"✗ HN fetch attempt {attempt}/{MAX_RETRIES} failed: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(2 ** attempt)
+
+    print(f"✗ Giving up fetching articles: {last_error}")
+    return []
+
+
+# --------------------------------------------------------------------------- #
+# Gemini: translation + summary (structured JSON only)
+# --------------------------------------------------------------------------- #
+def _extract_response_text(response):
+    """Robustly pull text out of a Gemini response.
+
+    `response.text` raises if the candidate finished for any reason other than
+    STOP (e.g. MAX_TOKENS, SAFETY). In that case we still try to salvage
+    whatever text parts are present.
+    """
     try:
-        # Calculate timestamp for 24 hours ago
-        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        query_timestamp = int(yesterday.timestamp())
+        text = response.text
+        if text:
+            return text
+    except Exception:
+        pass
 
-        params = {
-            "query": "story",
-            "tags": "story",
-            "numericFilters": f"created_at_i>{query_timestamp}",
-            "hitsPerPage": MAX_ARTICLES,
-            "typoTolerance": "false"
-        }
+    parts_text = []
+    for candidate in getattr(response, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            piece = getattr(part, "text", None)
+            if piece:
+                parts_text.append(piece)
+    return "".join(parts_text)
 
-        response = requests.get(HN_API_URL, params=params, timeout=10)
-        response.raise_for_status()
 
-        data = response.json()
-        hits = data.get("hits", [])
-
-        # Sort by points descending and take top articles
-        articles = sorted(hits, key=lambda x: x.get("points", 0), reverse=True)[:MAX_ARTICLES]
-
-        print(f"✓ Fetched {len(articles)} articles from Hacker News")
-        return articles
-
-    except requests.RequestException as e:
-        print(f"✗ Error fetching articles: {e}")
-        return []
+def _parse_json_array(raw):
+    """Parse a JSON array out of the model output, tolerating code fences."""
+    if not raw:
+        return None
+    text = raw.strip()
+    # Strip ```json ... ``` fences if present.
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Last resort: grab the outermost [ ... ] block.
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, list) else None
 
 
 def translate_and_summarize(articles):
+    """Attach `translation` and `summary` (list of lines) to each article.
+
+    Returns the same list, mutated in place. Articles the model failed to cover
+    keep a graceful placeholder so the digest still shows the title and URL --
+    a partial result is always better than dropping an article entirely.
     """
-    Translate and summarize articles using Gemini API.
-    Returns tuple: (ai_summary, articles) to preserve URL mapping
-    """
+    for article in articles:
+        article.setdefault("translation", "")
+        article.setdefault("summary", [])
+
     if not articles or not GEMINI_API_KEY:
-        print("✗ No articles or GEMINI_API_KEY not set")
-        return "", articles
+        print("✗ No articles or GEMINI_API_KEY not set; skipping translation")
+        return articles
 
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        # Use gemini-3.5-flash (latest available model)
-        model_name = "gemini-3.5-flash"
-        model = genai.GenerativeModel(model_name)
+    articles_block = "\n".join(
+        f'{i}. {a["title"]}' for i, a in enumerate(articles, 1)
+    )
+    prompt = f"""あなたは技術ニュースの翻訳者です。以下のHacker Newsの記事タイトルについて、
+それぞれ日本語タイトル訳と、内容の簡潔な要約（1〜3行）を作成してください。
 
-        # Build prompt with all articles
-        articles_text = ""
-        for i, article in enumerate(articles, 1):
-            title = article.get("title", "N/A")
-            url = article.get("url", "")
-            points = article.get("points", 0)
-            articles_text += f"\n{i}. Title: {title}\n   URL: {url}\n   Points: {points}\n"
+出力は **JSON配列のみ** とし、各要素は次の形式にしてください:
+{{"index": <記事番号(整数)>, "translation": "<日本語タイトル訳>", "summary": ["要約1行目", "要約2行目"]}}
 
-        prompt = f"""以下のHacker Newsの記事をリストアップしました。各記事について、以下の形式で日本語の翻訳と簡潔な要約を提供してください。
-
-【形式】
-記事番号. 【英語タイトル】
-英語URL
-【日本語翻訳】
-【簡潔な要約（3行以内）】
+- index は下記のリスト番号と必ず一致させること。
+- summary は各行を配列要素とし、1〜3要素にすること。
+- 記事タイトルのみが情報源です。推測を交えて構いませんが、簡潔にすること。
+- JSON以外のテキスト（前置き・コードフェンス等）は一切出力しないこと。
 
 【記事リスト】
-{articles_text}
-
-【回答】"""
-
-        response = model.generate_content(prompt)
-        result = response.text
-        
-        # Clean up the response: remove unnecessary template text
-        lines = result.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            # Skip template/metadata lines
-            if any(skip in line for skip in [
-                'ご提示いただいた',
-                '指定の形式で',
-                '回答',
-                '---',
-                'ご指定のフォーマットに沿って',
-                '各記事の日本語翻訳と簡潔な要約をお届けします'
-            ]):
-                continue
-            cleaned_lines.append(line)
-        
-        result = '\n'.join(cleaned_lines).strip()
-
-        print("✓ Generated translations and summaries")
-        return result, articles
-
-    except Exception as e:
-        print(f"✗ Error in Gemini API call: {e}")
-        print("⚠️  Using demo mode with template response")
-        # Return demo response
-        return generate_demo_response(articles), articles
-
-
-def save_to_archive(articles_data, ai_summary):
-    """Save articles and AI-generated summary to Archive markdown file."""
-    try:
-        today = datetime.now()
-        filename = ARCHIVE_DIR / f"{today.strftime('%Y-%m-%d')}.md"
-
-        # Build markdown content
-        markdown_content = f"""# Hacker News Digest - {today.strftime('%Y-%m-%d')}
-
-**Generated:** {today.strftime('%Y-%m-%d %H:%M:%S')} JST
-
-## AI-Generated Translations & Summaries
-
-{ai_summary}
-
----
-
-## Raw Article Data
-
+{articles_block}
 """
 
-        # Add raw article data
-        for article in articles_data:
-            markdown_content += f"""
-### {article.get('title', 'N/A')}
-- **URL:** {article.get('url', 'N/A')}
-- **Points:** {article.get('points', 0)}
-- **Author:** {article.get('author', 'N/A')}
+    generation_config = {
+        "response_mime_type": "application/json",
+        "temperature": 0.3,
+        "max_output_tokens": 8192,
+    }
 
-"""
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel(GEMINI_MODEL, generation_config=generation_config)
+            response = model.generate_content(prompt)
+            parsed = _parse_json_array(_extract_response_text(response))
 
-        # Write to file
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
+            if not parsed:
+                raise ValueError("model did not return a usable JSON array")
 
-        print(f"✓ Saved to {filename}")
-        return filename
+            # Map results back onto our articles by index.
+            by_index = {}
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get("index")
+                if isinstance(idx, str) and idx.isdigit():
+                    idx = int(idx)
+                if isinstance(idx, int) and 1 <= idx <= len(articles):
+                    by_index[idx] = item
 
-    except Exception as e:
-        print(f"✗ Error saving to archive: {e}")
-        return None
+            filled = 0
+            for i, article in enumerate(articles, 1):
+                item = by_index.get(i)
+                if not item:
+                    continue
+                translation = (item.get("translation") or "").strip()
+                summary = item.get("summary") or []
+                if isinstance(summary, str):
+                    summary = [summary]
+                summary = [str(s).strip() for s in summary if str(s).strip()]
+                if translation:
+                    article["translation"] = translation
+                if summary:
+                    article["summary"] = summary
+                if translation or summary:
+                    filled += 1
+
+            print(f"✓ Translated {filled}/{len(articles)} articles (attempt {attempt})")
+            if filled:
+                return articles
+            raise ValueError("no articles were filled")
+
+        except Exception as e:  # noqa: BLE001 - genai raises a variety of errors
+            last_error = e
+            print(f"✗ Gemini attempt {attempt}/{MAX_RETRIES} failed: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(2 ** attempt)
+
+    print(f"⚠️  Translation unavailable ({last_error}); posting titles/links only")
+    return articles
 
 
-def format_for_discord(ai_summary, articles=None):
-    """Format AI summary for better Discord readability.
-    - Removes duplicate URL lines
-    - Formats article titles as markdown links [title](<url>)
-    - Adds proper spacing between articles
-    - Uses > quotes for translations/summaries
+# --------------------------------------------------------------------------- #
+# Formatting (deterministic)
+# --------------------------------------------------------------------------- #
+def _format_article_block(index, article):
+    """Render one article as a Discord-ready text block.
+
+    URLs are wrapped in <> so Discord does not generate large link embeds.
     """
-    import re
-    lines = ai_summary.split('\n')
-    formatted_lines = []
-    skip_next_url = False
-    in_article = False
-    
-    for i, line in enumerate(lines):
-        # Detect article title lines (e.g., "1. 【Title】")
-        title_match = re.match(r'^(\d+)\.\s+【(.+?)】$', line)
-        if title_match:
-            article_num = int(title_match.group(1))
-            title = title_match.group(2)
-            
-            # Add blank lines before new article (except first one)
-            if formatted_lines:
-                # Ensure we have at least one blank line before this article
-                if formatted_lines[-1].strip() != "":
-                    formatted_lines.append("")
-                    formatted_lines.append("")  # Double blank line for article separation
-            
-            # Get URL from articles data
-            if articles and article_num <= len(articles):
-                url = articles[article_num - 1].get("url", "")
-                if url:
-                    # Format as markdown link: **[【Title】](<url>)**
-                    line = f"**{article_num}. [【{title}】](<{url}>)**"
-                    skip_next_url = True  # Skip the next URL line
-                else:
-                    line = f"**{article_num}. 【{title}】**"
-            else:
-                line = f"**{line}**"
-            
-            formatted_lines.append(line)
-            in_article = True
-        # Skip "URL: https://..." lines (already in title link)
-        elif skip_next_url and line.strip().startswith('URL:'):
-            skip_next_url = False
-            continue
-        # Skip bare URLs that come after title
-        elif skip_next_url and re.match(r'^https?://', line.strip()):
-            skip_next_url = False
-            continue
-        # Quote content lines (translations and summaries)
-        elif line.strip().startswith(('【日本語翻訳】', '【簡潔な要約')):
-            formatted_lines.append(f"> {line}")
-            skip_next_url = False
-        elif line.strip() and any(line.strip().startswith(marker) for marker in ['・', '-', '・・']):
-            formatted_lines.append(f"> {line}")
-        # Quote any non-empty line that's part of an article content (after title, before next article)
-        elif in_article and line.strip() and not re.match(r'^(\d+)\.\s+【', line):
-            # Check if this looks like article metadata (URL line) or actual content
-            if not line.strip().startswith('URL:') and not re.match(r'^https?://', line.strip()):
-                formatted_lines.append(f"> {line}")
-            else:
-                formatted_lines.append(line)
+    title = article["title"] or "(no title)"
+    url = article["url"]
+    lines = [f"**{index}. [{title}](<{url}>)**"]
+
+    translation = article.get("translation")
+    if translation:
+        lines.append(f"> 🇯🇵 **{translation}**")
+
+    for summary_line in article.get("summary", []):
+        # Normalise any leading bullet the model may have added.
+        clean = summary_line.lstrip("・-*• ").strip()
+        if clean:
+            lines.append(f"> ・{clean}")
+
+    if not translation and not article.get("summary"):
+        lines.append("> （翻訳は利用できませんでした）")
+
+    meta = f"　▲ {article['points']} points"
+    if article.get("hn_url"):
+        meta += f" ・ [💬 {article['num_comments']} comments](<{article['hn_url']}>)"
+    lines.append(meta)
+
+    return "\n".join(lines)
+
+
+def build_discord_messages(articles, header):
+    """Build the list of message strings to post, each within Discord's limit.
+
+    Article blocks are never split across messages, so an article's title,
+    translation and summary always stay together.
+    """
+    blocks = [_format_article_block(i, a) for i, a in enumerate(articles, 1)]
+
+    messages = []
+    current = header
+    for block in blocks:
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) > DISCORD_MAX_CHARS and current:
+            messages.append(current)
+            current = block
         else:
-            # Empty lines - preserve only between content sections
-            if not line.strip():
-                if formatted_lines and formatted_lines[-1].strip():
-                    formatted_lines.append("")
-            else:
-                formatted_lines.append(line)
-    
-    return '\n'.join(formatted_lines)
+            current = candidate
+    if current:
+        messages.append(current)
+    return messages
 
 
-def send_to_discord(ai_summary, articles=None):
-    """Send complete AI summary to Discord via webhook with optimized formatting."""
+# --------------------------------------------------------------------------- #
+# Discord
+# --------------------------------------------------------------------------- #
+def _post_discord(content):
+    """POST a single message to the webhook, retrying on transient failures."""
+    payload = {
+        "content": content,
+        "username": DISCORD_BOT_NAME,
+        "avatar_url": DISCORD_WEBHOOK_ICON,
+    }
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = SESSION.post(DISCORD_WEBHOOK_URL, json=payload, timeout=HTTP_TIMEOUT)
+            # Respect Discord's rate-limit backoff if we get one.
+            if response.status_code == 429:
+                retry_after = response.json().get("retry_after", SLEEP_BETWEEN_REQUESTS)
+                print(f"! Rate limited, waiting {retry_after}s")
+                time.sleep(float(retry_after) + 0.5)
+                continue
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"✗ Discord post attempt {attempt}/{MAX_RETRIES} failed: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(2 ** attempt)
+    return False
+
+
+def send_to_discord(articles):
+    """Post the digest to Discord. Returns True on success."""
     if not DISCORD_WEBHOOK_URL:
         print("! Discord webhook URL not set, skipping Discord notification")
         return True
 
-    try:
-        # Format for Discord (prevent URL embeds, improve readability, add markdown links)
-        formatted_summary = format_for_discord(ai_summary, articles)
-        
-        # Split content into chunks by article boundary (\n\n marks article separation)
-        chunks = []
-        current_chunk = ""
-        lines = formatted_summary.split('\n')
-        
-        for i, line in enumerate(lines):
-            # Check if this is a new article title (starts with **)
-            is_article_title = line.strip().startswith('**') and '【' in line
-            
-            # If we're starting a new article and current chunk is getting large
-            if is_article_title and current_chunk and len(current_chunk) > DISCORD_MAX_CHARS * 0.6:
-                # Save current chunk
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                current_chunk = line + '\n'
-            else:
-                # Add line to current chunk
-                if current_chunk and not current_chunk.endswith('\n'):
-                    current_chunk += '\n'
-                current_chunk += line + '\n'
-                
-                # If chunk exceeds limit, save it
-                if len(current_chunk) > DISCORD_MAX_CHARS:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = ""
-        
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
+    header = f"📰 **Hacker News Digest** - {datetime.now().strftime('%Y-%m-%d')}"
+    messages = build_discord_messages(articles, header)
 
-        # Add header message with timestamp
-        header = f"📰 **Hacker News Digest** - {datetime.now().strftime('%Y-%m-%d')}"
-        
-        # Send header first
-        header_payload = {
-            "content": header,
-            "username": DISCORD_BOT_NAME,
-            "avatar_url": DISCORD_WEBHOOK_ICON
-        }
-        response = requests.post(DISCORD_WEBHOOK_URL, json=header_payload, timeout=10)
-        response.raise_for_status()
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
+    sent = 0
+    for i, message in enumerate(messages):
+        if not _post_discord(message):
+            print(f"✗ Failed to send message {i + 1}/{len(messages)}")
+            return False
+        sent += 1
+        if i < len(messages) - 1:
+            time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-        # Send each chunk as a separate message with full content
-        for i, chunk in enumerate(chunks, 1):
-            if not chunk.strip():
-                continue
-
-            payload = {
-                "content": chunk,
-                "username": DISCORD_BOT_NAME,
-                "avatar_url": DISCORD_WEBHOOK_ICON
-            }
-
-            response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-            response.raise_for_status()
-            
-            # Small delay between messages to avoid rate limiting
-            if i < len(chunks):
-                time.sleep(SLEEP_BETWEEN_REQUESTS)
-
-        print(f"✓ Sent {len(chunks) + 1} message(s) to Discord")
-        return True
-
-    except requests.RequestException as e:
-        print(f"✗ Error sending to Discord: {e}")
-        return False
+    print(f"✓ Sent {sent} message(s) to Discord")
+    return True
 
 
-def parse_summary(ai_summary):
-    """Parse AI summary to extract individual articles."""
-    articles = []
-    lines = ai_summary.split('\n')
-    current_article = {}
-    
-    for line in lines:
-        # Look for numbered articles like "1. 【Title】"
-        if line.strip() and line[0].isdigit() and '【' in line and '】' in line:
-            if current_article:
-                articles.append(current_article)
-            # Extract title
-            start = line.find('【') + 1
-            end = line.find('】')
-            current_article = {
-                'title': line[start:end] if start > 0 and end > start else line,
-                'number': line.split('.')[0] if '.' in line else ''
-            }
-        elif '【日本語翻訳】' in line:
-            current_article['has_translation'] = True
-        elif '【簡潔な要約' in line or '【要約】' in line:
-            current_article['has_summary'] = True
-    
-    if current_article:
-        articles.append(current_article)
-    
-    return articles
-
-
-def format_article_message(article):
-    """Format a single article into a readable Discord message."""
-    msg = f"**{article.get('number', '')}. {article.get('title', 'No Title')}**\n"
-    msg += "✅ 翻訳と要約が準備できました\n"
-    msg += "> 詳細は Archive を確認してください\n"
-    return msg
-
-
-def split_into_chunks(text, max_size):
-    """Split text into chunks respecting character limit."""
-    chunks = []
-    current_chunk = ""
-    
-    for line in text.split('\n'):
-        if len(current_chunk) + len(line) + 1 > max_size:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = line
-        else:
-            current_chunk += line + '\n'
-    
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
 def main():
-    """Main execution function."""
     print("=" * 60)
     print("Hacker News to Discord Integration")
     print(f"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} JST")
     print("=" * 60)
 
     try:
-        # Setup
-        setup_archive_dir()
-
-        # Fetch articles
         articles = fetch_top_articles()
         if not articles:
             print("✗ No articles fetched, exiting")
             return False
 
-        # Translate and summarize (returns tuple: (summary, articles))
-        ai_summary, articles_with_data = translate_and_summarize(articles)
-        if not ai_summary:
-            print("✗ Failed to generate summaries, exiting")
-            return False
+        translate_and_summarize(articles)
 
-        # Save to archive
-        archive_file = save_to_archive(articles, ai_summary)
-        if not archive_file:
-            print("✗ Failed to save to archive, exiting")
-            return False
-
-        # Send to Discord with articles data for markdown links
-        send_to_discord(ai_summary, articles_with_data)
+        ok = send_to_discord(articles)
 
         print("=" * 60)
-        print("✓ All tasks completed successfully")
+        print("✓ All tasks completed" if ok else "⚠️  Completed with Discord errors")
         print("=" * 60)
-        return True
+        return ok
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - top-level safety net
         print(f"✗ Unexpected error: {e}")
         return False
 
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    raise SystemExit(0 if main() else 1)

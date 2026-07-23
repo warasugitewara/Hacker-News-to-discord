@@ -1,12 +1,11 @@
 #!/bin/bash
-# Hacker News to Discord - Execution Script with Git automation
+# Hacker News to Discord - Execution Script
 
 set -e  # Exit on any error
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/main.py"
 VENV_PYTHON="$SCRIPT_DIR/venv/bin/python3"
-ARCHIVE_DIR="$SCRIPT_DIR/Archive"
 ENV_FILE="$HOME/.hacker-news-env"
 
 echo "========================================="
@@ -58,27 +57,6 @@ fi
 
 # Run the main Python script using venv with exported environment variables
 if "$VENV_PYTHON" "$PYTHON_SCRIPT"; then
-    echo "✓ Python script executed successfully"
-    
-    # Commit and push Archive changes
-    # NOTE: git status won't show ignored files, so we add -f first, then check staged diff
-    cd "$SCRIPT_DIR"
-
-    git add -f Archive/
-
-    if ! git diff --cached --quiet; then
-        echo "✓ Changes detected in Archive directory"
-
-        COMMIT_DATE=$(date +"%Y-%m-%d")
-        git commit -m "docs: archive Hacker News digest [$COMMIT_DATE]"
-        echo "✓ Committed changes"
-
-        git push origin main
-        echo "✓ Pushed to GitHub"
-    else
-        echo "! No changes detected in Archive directory"
-    fi
-    
     echo "========================================="
     echo "✓ Script completed successfully"
     echo "========================================="

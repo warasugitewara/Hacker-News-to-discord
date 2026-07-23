@@ -3,10 +3,6 @@
 .env.local
 ~/.hacker-news-env
 
-# Archive (local digest files)
-Archive/
-*.md.bak
-
 # Python
 __pycache__/
 *.py[cod]
