@@ -4,8 +4,8 @@ Hacker News to Discord Integration
 =================================
 
 Fetches the top Hacker News stories from the past 24 hours, asks Gemini for a
-Japanese translation + short summary of each, saves a local Markdown digest and
-posts a formatted message to a Discord webhook.
+Japanese translation + short summary of each, and posts a formatted message to
+a Discord webhook.
 
 Design note
 -----------
@@ -22,7 +22,6 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import requests
 import google.generativeai as genai
@@ -37,9 +36,6 @@ HN_ITEM_URL = "https://news.ycombinator.com/item?id={id}"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
-SCRIPT_DIR = Path(__file__).parent
-ARCHIVE_DIR = SCRIPT_DIR / "Archive"
 
 # How many stories end up in the digest.
 MAX_ARTICLES = int(os.getenv("HN_MAX_ARTICLES", "5"))
@@ -69,11 +65,6 @@ SESSION.headers.update({"User-Agent": "hacker-news-to-discord/2.0"})
 # --------------------------------------------------------------------------- #
 # Hacker News
 # --------------------------------------------------------------------------- #
-def setup_archive_dir():
-    """Create the Archive directory if it doesn't exist."""
-    ARCHIVE_DIR.mkdir(exist_ok=True)
-
-
 def _normalize_article(hit):
     """Turn a raw Algolia hit into the flat dict the rest of the code uses.
 
@@ -338,48 +329,6 @@ def build_discord_messages(articles, header):
 
 
 # --------------------------------------------------------------------------- #
-# Archive
-# --------------------------------------------------------------------------- #
-def save_to_archive(articles):
-    """Save the digest to a dated Markdown file, built deterministically."""
-    try:
-        today = datetime.now()
-        filename = ARCHIVE_DIR / f"{today.strftime('%Y-%m-%d')}.md"
-
-        parts = [
-            f"# Hacker News Digest - {today.strftime('%Y-%m-%d')}",
-            "",
-            f"**Generated:** {today.strftime('%Y-%m-%d %H:%M:%S')} JST",
-            "",
-        ]
-
-        for i, article in enumerate(articles, 1):
-            parts.append(f"## {i}. {article['title']}")
-            parts.append("")
-            if article.get("translation"):
-                parts.append(f"**{article['translation']}**")
-                parts.append("")
-            for line in article.get("summary", []):
-                parts.append(f"- {line.lstrip('・-*• ').strip()}")
-            if article.get("summary"):
-                parts.append("")
-            parts.append(f"- **URL:** {article['url']}")
-            parts.append(f"- **HN:** {article.get('hn_url', 'N/A')}")
-            parts.append(f"- **Points:** {article['points']}")
-            parts.append(f"- **Comments:** {article.get('num_comments', 0)}")
-            parts.append(f"- **Author:** {article['author']}")
-            parts.append("")
-
-        filename.write_text("\n".join(parts), encoding="utf-8")
-        print(f"✓ Saved digest to {filename}")
-        return filename
-
-    except OSError as e:
-        print(f"✗ Error saving to archive: {e}")
-        return None
-
-
-# --------------------------------------------------------------------------- #
 # Discord
 # --------------------------------------------------------------------------- #
 def _post_discord(content):
@@ -439,8 +388,6 @@ def main():
     print("=" * 60)
 
     try:
-        setup_archive_dir()
-
         articles = fetch_top_articles()
         if not articles:
             print("✗ No articles fetched, exiting")
@@ -448,7 +395,6 @@ def main():
 
         translate_and_summarize(articles)
 
-        save_to_archive(articles)
         ok = send_to_discord(articles)
 
         print("=" * 60)

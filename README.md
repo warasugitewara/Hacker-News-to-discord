@@ -27,9 +27,8 @@ Hacker News API ──▶ points 順で上位を抽出 ──▶ Gemini で翻�
         │                                              │
         └──────────────▶ Python で決定論的に整形 ◀──────┘
                                    │
-                    ┌──────────────┴──────────────┐
-                    ▼                              ▼
-            Discord Webhook 📨            Archive/YYYY-MM-DD.md 📁
+                                   ▼
+                          Discord Webhook 📨
 ```
 
 > [!NOTE]
@@ -47,7 +46,6 @@ Hacker News API ──▶ points 順で上位を抽出 ──▶ Gemini で翻�
 | 🧱 **崩れないレイアウト** | タイトルはクリック可能なリンク、要約は引用形式。記事はメッセージ境界で分割され途中で切れない |
 | ♻️ **堅牢なリトライ** | HN・Gemini・Discord の各通信を指数バックオフで再試行。Discord のレート制限(429)も自動待機 |
 | 🛟 **グレースフルな劣化** | 翻訳が失敗しても、タイトルと URL は必ず投稿される |
-| 🗂️ **ローカルにアーカイブ** | 毎日のダイジェストを `Archive/` に Markdown で保存 |
 | ⏰ **完全自動** | systemd タイマーで毎朝 07:00 JST に自動実行 |
 
 ## クイックスタート
@@ -144,9 +142,7 @@ Hacker-News-to-discord/
 ├── requirements.txt      # Python 依存パッケージ
 ├── hacker-news.service   # systemd サービス（※ User/パス要確認）
 ├── hacker-news.timer     # systemd タイマー（毎朝 07:00 JST）
-├── .env.example          # 環境変数テンプレート
-└── Archive/              # 日次ダイジェスト（.gitignore 済み・自動作成）
-    └── YYYY-MM-DD.md
+└── .env.example          # 環境変数テンプレート
 ```
 
 ## トラブルシューティング

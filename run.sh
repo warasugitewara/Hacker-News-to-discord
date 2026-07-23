@@ -1,12 +1,11 @@
 #!/bin/bash
-# Hacker News to Discord - Execution Script with Git automation
+# Hacker News to Discord - Execution Script
 
 set -e  # Exit on any error
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/main.py"
 VENV_PYTHON="$SCRIPT_DIR/venv/bin/python3"
-ARCHIVE_DIR="$SCRIPT_DIR/Archive"
 ENV_FILE="$HOME/.hacker-news-env"
 
 echo "========================================="
